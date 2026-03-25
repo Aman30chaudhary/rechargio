@@ -4,6 +4,8 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const { connectDB, sequelize } = require('./config/database');
+const errorHandler = require('./middleware/errorHandler');
+const AppError = require('./utils/appError');
 
 dotenv.config();
 
@@ -34,11 +36,13 @@ app.use('/api/recharge', require('./routes/rechargeRoutes'));
 app.use('/api/admin', require('./routes/adminRoutes'));
 app.use('/api/wallet', require('./routes/walletRoutes'));
 
-// Error handling
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).send('Something broke!');
+// Unhandled Routes
+app.all('*', (req, res, next) => {
+  next(new AppError(`Can't find ${req.originalUrl} on this server!`, 404));
 });
+
+// Centralized Error handling
+app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
 

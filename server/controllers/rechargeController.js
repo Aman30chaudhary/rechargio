@@ -5,13 +5,15 @@ const CashbackRule = require('../models/CashbackRule');
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
 const { Op } = require('sequelize');
+const catchAsync = require('../utils/catchAsync');
+const AppError = require('../utils/appError');
 
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-const detectOperator = (mobileNumber) => {
+const detectOperatorLogic = (mobileNumber) => {
   // Enhanced simulation logic based on common Indian mobile number series
   const firstDigit = mobileNumber[0];
   const firstTwo = mobileNumber.substring(0, 2);
@@ -24,131 +26,109 @@ const detectOperator = (mobileNumber) => {
   return 'Airtel'; // default
 };
 
-exports.detectOperator = async (req, res) => {
+exports.detectOperator = catchAsync(async (req, res, next) => {
   const { mobileNumber } = req.body;
   if (!mobileNumber || mobileNumber.length < 4) {
-    return res.status(400).json({ message: 'Mobile number too short for detection' });
+    return next(new AppError('Mobile number too short for detection', 400));
   }
-  const operator = detectOperator(mobileNumber);
+  const operator = detectOperatorLogic(mobileNumber);
   res.status(200).json({ operator });
-};
+});
 
-exports.createOrder = async (req, res) => {
-  try {
-    const { amount } = req.body;
-    const options = {
-      amount: amount * 100, // razorpay expects in paise
-      currency: "INR",
-      receipt: `receipt_${Date.now()}`,
-    };
-    const order = await razorpay.orders.create(options);
-    res.status(200).json(order);
-  } catch (err) {
-    res.status(500).json({ message: 'Order creation failed', error: err.message });
-  }
-};
+exports.createOrder = catchAsync(async (req, res, next) => {
+  const { amount } = req.body;
+  if (!amount) return next(new AppError('Amount is required', 400));
 
-exports.verifyPayment = async (req, res) => {
+  const options = {
+    amount: amount * 100, // razorpay expects in paise
+    currency: "INR",
+    receipt: `receipt_${Date.now()}`,
+  };
+  
+  const order = await razorpay.orders.create(options);
+  res.status(200).json(order);
+});
+
+exports.verifyPayment = catchAsync(async (req, res, next) => {
   const { razorpay_order_id, razorpay_payment_id, razorpay_signature, amount, service, details, userId } = req.body;
   
+  if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+    return next(new AppError('Payment details missing', 400));
+  }
+
   const generated_signature = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
     .update(razorpay_order_id + "|" + razorpay_payment_id)
     .digest('hex');
 
-  if (generated_signature === razorpay_signature) {
-    try {
-      // Payment verified, now simulate service processing
-      const success = Math.random() < 0.95; // 95% success rate for all services
-      
-      // Get margin from admin settings
-      const settings = await AdminSettings.findOne({ order: [['updatedAt', 'DESC']] }) || { distributorMargin: 5 }; // default 5%
-      const adminProfit = (amount * settings.distributorMargin) / 100;
-      
-      // Check for cashback rules
-      let cashbackAmount = 0;
-      const rules = await CashbackRule.findAll({ 
-        where: { 
-          isActive: true, 
-          minAmount: { [Op.lte]: amount } 
-        },
-        order: [['minAmount', 'DESC']]
-      });
-      
-      if (rules.length > 0) {
-        cashbackAmount = (amount * rules[0].cashbackPercent) / 100;
-      }
-
-      const transaction = await Transaction.create({
-        userId,
-        amount,
-        serviceType: service || 'Mobile',
-        serviceDetails: details,
-        mobileNumber: details.mobileNumber || details.phoneNumber || details.accountNumber || details.consumerNumber || details.cardNumber || details.subscriberId || details.consumerId,
-        operator: details.operator || details.board || 'Other',
-        status: success ? 'success' : 'failed',
-        paymentId: razorpay_payment_id,
-        orderId: razorpay_order_id,
-        distributorMargin: settings.distributorMargin,
-        adminProfit: adminProfit,
-        cashbackEarned: success ? cashbackAmount : 0,
-      });
-
-      if (success && cashbackAmount > 0) {
-        // Update user wallet
-        await User.increment({ walletBalance: cashbackAmount }, { where: { id: userId } });
-      }
-
-      // Notify user via socket.io
-      const io = req.app.get('io');
-      if (io) {
-        io.emit('transactionUpdate', transaction);
-      }
-
-      res.status(200).json({ status: success ? 'success' : 'failed', transaction });
-    } catch (dbErr) {
-      console.error('Database error in verifyPayment:', dbErr);
-      res.status(500).json({ message: 'Error processing transaction', error: dbErr.message });
-    }
-  } else {
-    res.status(400).json({ message: 'Payment verification failed' });
+  if (generated_signature !== razorpay_signature) {
+    return next(new AppError('Invalid payment signature', 400));
   }
-};
 
-exports.getOffers = async (req, res) => {
-  try {
-    const { operator } = req.params;
-    
-    // Mock offers for different operators
-    const allOffers = {
-      'Airtel': [
-        { id: 1, title: 'Airtel Saver', price: 199, description: '1.5GB/day + Unlimited Calls', validity: '28 Days' },
-        { id: 2, title: 'Airtel Booster', price: 49, description: '6GB Data Pack', validity: 'Existing' },
-        { id: 3, title: 'Airtel Family', price: 599, description: '100GB Data + 4 Connections', validity: '30 Days' },
-        { id: 4, title: 'Airtel WFH', price: 251, description: '50GB Data Pack', validity: '28 Days' },
-      ],
-      'Jio': [
-        { id: 1, title: 'Jio Super', price: 239, description: '1.5GB/day + Unlimited Calls', validity: '28 Days' },
-        { id: 2, title: 'Jio Data', price: 61, description: '6GB Data Pack', validity: 'Existing' },
-        { id: 3, title: 'Jio Happy', price: 666, description: '1.5GB/day + Unlimited Calls', validity: '84 Days' },
-        { id: 4, title: 'Jio Cricket', price: 499, description: '3GB/day + Disney+ Hotstar', validity: '28 Days' },
-      ],
-      'VI': [
-        { id: 1, title: 'VI Hero', price: 299, description: '1.5GB/day + Weekend Rollover', validity: '28 Days' },
-        { id: 2, title: 'VI Data', price: 58, description: '3GB Data Pack', validity: 'Existing' },
-        { id: 3, title: 'VI Unlimited', price: 479, description: '1.5GB/day + Unlimited Calls', validity: '56 Days' },
-        { id: 4, title: 'VI Binge', price: 359, description: '2GB/day + Binge All Night', validity: '28 Days' },
-      ],
-      'BSNL': [
-        { id: 1, title: 'BSNL PV', price: 107, description: '3GB Data + 200 mins Calls', validity: '40 Days' },
-        { id: 2, title: 'BSNL Data', price: 98, description: '2GB/day Data Pack', validity: '22 Days' },
-        { id: 3, title: 'BSNL Voice', price: 187, description: '2GB/day + Unlimited Calls', validity: '28 Days' },
-        { id: 4, title: 'BSNL Annual', price: 1999, description: '600GB Data + Unlimited Calls', validity: '365 Days' },
-      ]
-    };
-
-    const offers = allOffers[operator] || allOffers['Airtel']; // Fallback to Airtel if operator not found
-    res.status(200).json(offers);
-  } catch (err) {
-    res.status(500).json({ message: 'Failed to fetch offers', error: err.message });
+  // Payment verified, now simulate service processing
+  const success = Math.random() < 0.95; // 95% success rate for all services
+  
+  // Get margin from admin settings
+  const settings = await AdminSettings.findOne({ order: [['updatedAt', 'DESC']] }) || { distributorMargin: 5 }; // default 5%
+  const adminProfit = (amount * settings.distributorMargin) / 100;
+  
+  // Check for cashback rules
+  let cashbackAmount = 0;
+  const rules = await CashbackRule.findAll({ 
+    where: { 
+      isActive: true, 
+      minAmount: { [Op.lte]: amount } 
+    },
+    order: [['minAmount', 'DESC']]
+  });
+  
+  if (rules.length > 0) {
+    cashbackAmount = (amount * rules[0].cashbackPercent) / 100;
   }
-};
+
+  const transaction = await Transaction.create({
+    userId,
+    amount,
+    serviceType: service || 'Mobile',
+    serviceDetails: details,
+    mobileNumber: details.mobileNumber || details.phoneNumber || details.accountNumber || details.consumerNumber || details.cardNumber || details.subscriberId || details.consumerId,
+    operator: details.operator || details.board || 'Other',
+    status: success ? 'success' : 'failed',
+    paymentId: razorpay_payment_id,
+    orderId: razorpay_order_id,
+    distributorMargin: settings.distributorMargin,
+    adminProfit: adminProfit,
+    cashbackEarned: success ? cashbackAmount : 0,
+  });
+
+  if (success && cashbackAmount > 0) {
+    // Update user wallet
+    await User.increment({ walletBalance: cashbackAmount }, { where: { id: userId } });
+  }
+
+  res.status(200).json({
+    status: success ? 'success' : 'failed',
+    transactionId: transaction.id,
+    cashbackEarned: cashbackAmount
+  });
+});
+
+exports.getOffers = catchAsync(async (req, res, next) => {
+  const { operator } = req.params;
+  
+  // Simulation: Return different offers based on operator
+  const baseOffers = [
+    { id: 1, title: 'Super Saver Plan', description: 'Unlimited calls + 2GB/day + 100 SMS/day', price: 299, validity: '28 Days' },
+    { id: 2, title: 'Data Booster', description: '50GB high-speed data for your streaming needs', price: 199, validity: 'Existing' },
+    { id: 3, title: 'Value Pack', description: '₹100 Talktime + 1GB Data', price: 99, validity: '15 Days' },
+    { id: 4, title: 'Cricket Pack', description: 'Disney+ Hotstar Subscription + 3GB/day', price: 499, validity: '56 Days' },
+    { id: 5, title: 'Work From Home', description: 'Unlimited Data (capped at 5GB/day)', price: 251, validity: '30 Days' },
+  ];
+
+  // Randomize prices slightly for simulation
+  const offers = baseOffers.map(o => ({
+    ...o,
+    price: o.price + (operator.length % 5) * 10
+  }));
+
+  res.status(200).json(offers);
+});
