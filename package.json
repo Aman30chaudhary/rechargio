@@ -1,0 +1,14 @@
+{
+  "name": "recharge-portal",
+  "version": "1.0.0",
+  "description": "Full-stack Recharge Portal",
+  "scripts": {
+    "client": "npm run dev --prefix client",
+    "server": "npm run dev --prefix server",
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "install-all": "npm install && npm install --prefix client && npm install --prefix server"
+  },
+  "dependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
